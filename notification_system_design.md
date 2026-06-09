@@ -349,3 +349,72 @@ INSERT INTO notifications (student_id, notification_type, message)
 VALUES ($1, $2, $3)
 RETURNING id, notification_type, message, is_read, created_at;
 ```
+
+## Stage 3
+
+The query under review:
+
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+### Is the query accurate?
+
+Functionally, yes. It returns the correct rows: all unread notifications for student 1042, oldest first. The result is correct. The problem is not correctness, it is performance and the use of `SELECT *`.
+
+### Why is it slow?
+
+With 50,000 students and 5,000,000 notifications, and assuming no supporting index:
+
+- The planner has no index that matches `(student_id, is_read)`, so it falls back to a **sequential scan** of all 5,000,000 rows, testing the predicate on each one.
+- After filtering it must **sort** the surviving rows to satisfy `ORDER BY created_at ASC`, which adds CPU and possibly disk spill.
+- `SELECT *` pulls every column, including the large `message` text, inflating I/O even for rows the client may not need in full.
+
+The cost is roughly **O(N)** in rows scanned (N = 5,000,000) plus an **O(k log k)** sort on the k matching rows. Every call re-scans the whole table.
+
+### What I would change
+
+Add a composite partial index that matches the predicate and the sort order, and stop selecting all columns:
+
+```sql
+CREATE INDEX idx_notifications_student_unread
+    ON notifications (student_id, created_at)
+    WHERE is_read = FALSE;
+```
+
+```sql
+SELECT id, notification_type, message, is_read, created_at
+FROM notifications
+WHERE student_id = 1042 AND is_read = FALSE
+ORDER BY created_at ASC
+LIMIT 20;
+```
+
+With this index the planner does an **index range scan** that jumps straight to student 1042's unread rows, already ordered by `created_at`, so the sort disappears too. The likely cost drops from scanning 5,000,000 rows to touching only the handful that belong to that student, roughly **O(log N + k)**. Adding `LIMIT` with pagination caps the work per request further.
+
+### Is "add indexes on every column" good advice?
+
+No. Indexing every column is a poor strategy:
+
+- **Indexes are not free.** Each one consumes storage and must be updated on every `INSERT`, `UPDATE`, and `DELETE`. With 5,000,000 rows and a heavy write path (Notify All), redundant indexes slow writes and bloat the database.
+- **The planner only uses indexes that match query shapes.** An index on `message` or `is_read` alone does nothing for this query. What helps is a **composite index in the right column order** that matches the predicates and sort.
+- The right approach is to index based on **actual query patterns**, favouring composite and partial indexes, not to blanket-index every column.
+
+### Students who got a placement notification in the last 7 days
+
+```sql
+SELECT DISTINCT s.id, s.roll_no, s.name
+FROM students s
+JOIN notifications n ON n.student_id = s.id
+WHERE n.notification_type = 'placement'
+  AND n.created_at >= now() - INTERVAL '7 days';
+```
+
+This is supported efficiently by an index on the type and time:
+
+```sql
+CREATE INDEX idx_notifications_type_created
+    ON notifications (notification_type, created_at);
+```
