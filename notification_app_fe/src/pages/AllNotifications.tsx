@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import Box from "@mui/material/Box";
+import Chip from "@mui/material/Chip";
 import { Notification } from "../types";
 import { fetchNotifications } from "../api";
 import { Log } from "../logger";
@@ -32,7 +33,8 @@ export default function AllNotifications() {
         }
         setNotifications(data);
 
-        // Capture which IDs were new before this view, then mark them viewed.
+        // Snapshot the previously-viewed set so newly arrived items render as
+        // "new", then persist the current items as viewed for next time.
         setViewedIds(getViewedIds());
         markViewed(data.map((n) => n.ID));
 
@@ -42,7 +44,7 @@ export default function AllNotifications() {
           "page",
           `all notifications page loaded ${data.length} items`
         );
-      } catch (err) {
+      } catch {
         if (active) {
           setError("Could not load notifications. Please try again.");
         }
@@ -59,17 +61,29 @@ export default function AllNotifications() {
     };
   }, [filter]);
 
+  const newCount = notifications.filter((n) => !viewedIds.has(n.ID)).length;
+
   return (
     <Stack spacing={3}>
       <Box>
-        <Typography variant="h5" gutterBottom>
-          All Notifications
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Every notification, newest highlighted until you have seen it.
+        <Stack direction="row" alignItems="center" spacing={1.5}>
+          <Typography variant="h4">Notifications</Typography>
+          {!loading && newCount > 0 && (
+            <Chip
+              label={`${newCount} new`}
+              size="small"
+              color="primary"
+              sx={{ fontWeight: 700 }}
+            />
+          )}
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+          Everything happening across placements, results, and events.
         </Typography>
       </Box>
+
       <TypeFilter value={filter} onChange={setFilter} />
+
       <NotificationList
         notifications={notifications}
         viewedIds={viewedIds}

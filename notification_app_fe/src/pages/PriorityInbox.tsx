@@ -4,6 +4,8 @@ import Typography from "@mui/material/Typography";
 import Box from "@mui/material/Box";
 import MenuItem from "@mui/material/MenuItem";
 import TextField from "@mui/material/TextField";
+import Chip from "@mui/material/Chip";
+import BoltRoundedIcon from "@mui/icons-material/BoltRounded";
 import { Notification } from "../types";
 import { fetchNotifications } from "../api";
 import { Log } from "../logger";
@@ -16,7 +18,7 @@ import TypeFilter from "../components/TypeFilter";
 const LIMIT_OPTIONS = [10, 15, 20];
 
 // Page that displays the top "n" notifications by priority (placement >
-// result > event, then recency), with a type filter and selectable count.
+// result > event, then recency), with a type filter and a selectable count.
 export default function PriorityInbox() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [viewedIds] = useState<Set<string>>(getViewedIds());
@@ -45,7 +47,7 @@ export default function PriorityInbox() {
           "page",
           `priority inbox showing top ${limit}`
         );
-      } catch (err) {
+      } catch {
         if (active) {
           setError("Could not load priority notifications. Please try again.");
         }
@@ -65,13 +67,30 @@ export default function PriorityInbox() {
   return (
     <Stack spacing={3}>
       <Box>
-        <Typography variant="h5" gutterBottom>
-          Priority Inbox
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          The most important unread notifications first, ranked by type and recency.
-        </Typography>
+        <Stack direction="row" alignItems="center" spacing={1.5}>
+          <Box
+            sx={{
+              width: 40,
+              height: 40,
+              borderRadius: 2.5,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              bgcolor: "rgba(245, 158, 11, 0.14)",
+              color: "warning.main",
+            }}
+          >
+            <BoltRoundedIcon />
+          </Box>
+          <Box>
+            <Typography variant="h4">Priority Inbox</Typography>
+            <Typography variant="body2" color="text.secondary">
+              The most important notifications first, ranked by type and recency.
+            </Typography>
+          </Box>
+        </Stack>
       </Box>
+
       <Stack
         direction={{ xs: "column", sm: "row" }}
         spacing={2}
@@ -79,21 +98,30 @@ export default function PriorityInbox() {
       >
         <TypeFilter value={filter} onChange={setFilter} />
         <Box sx={{ flexGrow: 1 }} />
-        <TextField
-          select
-          size="small"
-          label="Show top"
-          value={limit}
-          onChange={(e) => setLimit(Number(e.target.value))}
-          sx={{ minWidth: 120 }}
-        >
-          {LIMIT_OPTIONS.map((option) => (
-            <MenuItem key={option} value={option}>
-              Top {option}
-            </MenuItem>
-          ))}
-        </TextField>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <Chip
+            label={`${notifications.length} shown`}
+            size="small"
+            variant="outlined"
+            sx={{ borderColor: "divider", fontWeight: 600 }}
+          />
+          <TextField
+            select
+            size="small"
+            label="Show top"
+            value={limit}
+            onChange={(e) => setLimit(Number(e.target.value))}
+            sx={{ minWidth: 120 }}
+          >
+            {LIMIT_OPTIONS.map((option) => (
+              <MenuItem key={option} value={option}>
+                Top {option}
+              </MenuItem>
+            ))}
+          </TextField>
+        </Stack>
       </Stack>
+
       <NotificationList
         notifications={notifications}
         viewedIds={viewedIds}
