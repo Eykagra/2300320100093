@@ -458,3 +458,80 @@ Use `ETag`/`Last-Modified` and short-lived client caching so the browser can iss
 ### Recommended Combination
 
 Use SSE to remove repeated fetches during an active session (Strategy 3), back the initial load and reconnect catch-up with a Redis cache (Strategy 1), and keep a denormalised unread counter for the badge (Strategy 2). HTTP caching (Strategy 4) is a low-cost addition on top. Together they shift the workload from "read on every page load" to "read only when data changes", which is what protects the database at scale.
+
+## Stage 5
+
+The proposed implementation:
+
+```
+function notify_all(student_ids: array, message: string):
+    for student_id in student_ids:
+        send_email(student_id, message)   # calls Email API
+        save_to_db(student_id, message)   # DB insert
+        push_to_app(student_id, message)  # real-time push
+```
+
+### Shortcomings of this implementation
+
+1. **Synchronous and serial.** It processes 50,000 students one at a time in a single loop. The HR request blocks until the whole loop finishes, which can take minutes, and likely times out.
+2. **No fault isolation.** If `send_email` throws or hangs for one student, the loop can stop and every student after that point gets nothing.
+3. **No retries.** A transient failure (email provider blip, network timeout) is permanent for that student. There is no record of what failed.
+4. **Tight coupling of independent concerns.** Email delivery, persistence, and in-app push are bound together in lock-step, so the slowest/least reliable step (email) dictates the speed and success of the others.
+5. **Email API is a bottleneck and rate limit risk.** Hammering the email provider with 50,000 sequential calls invites throttling.
+6. **Not idempotent.** If the operation is retried after a partial failure, students who already received the message may be emailed and saved again, causing duplicates.
+
+### "send_email failed for 200 students midway" — what now?
+
+In the current design those 200 failures are silently lost because there is no record of per-student status and no retry path. The fix is to make delivery **tracked and retryable**: each student's notification should have a status (`pending`, `sent`, `failed`), and only the failed ones should be retried, without touching the students who already succeeded.
+
+### Should save-to-DB and send-email happen together?
+
+**No, they should be decoupled.** They have different reliability profiles and different meanings:
+
+- Saving to the database is fast, local, and under our control. It is the **source of truth** that the notification exists.
+- Sending email goes through an external provider, is slower, and fails independently.
+
+If they are coupled, a flaky email provider can block or roll back a database write that should have succeeded, and a successful save can be undone by an unrelated email failure. The correct order is to **persist first** (so the in-app notification is guaranteed and the record exists), then dispatch email **asynchronously** as a separate, retryable step that updates the delivery status. This way email failures never cost us the notification itself.
+
+### Redesign: reliable and fast
+
+Turn the synchronous loop into an **asynchronous, queue-based fan-out**:
+
+1. The `notify_all` request does minimal work: it persists the notifications in a batch and enqueues one delivery job per student (or per batch), then returns immediately. HR gets an instant response.
+2. A pool of **workers** consumes the queue in parallel, sending email and pushing in-app notifications. Parallelism gives speed; the queue gives buffering and backpressure so the email provider is not overwhelmed.
+3. Each job is **retried with backoff** on transient failure. Jobs that exhaust retries land in a **dead-letter queue** for inspection. Only failed students are retried, never the whole batch.
+4. Delivery is **idempotent**: each notification row carries a status, and a job marks it `sent` only on success, so reprocessing never produces duplicates.
+
+### Revised Pseudocode
+
+```
+# Step 1: the API call returns fast. Persist, then enqueue.
+function notify_all(student_ids: array, message: string):
+    # Batch insert all notifications as the source of truth (status = 'pending').
+    rows = build_notification_rows(student_ids, message, status = 'pending')
+    batch_insert(rows)                       # single fast DB write, in chunks
+
+    # Enqueue one delivery job per student for async processing.
+    for student_id in student_ids:
+        enqueue(delivery_queue, { student_id, message })
+
+    return { accepted: true, count: length(student_ids) }
+
+
+# Step 2: workers run in parallel, consuming the queue.
+function delivery_worker():
+    while true:
+        job = dequeue(delivery_queue)
+        try:
+            push_to_app(job.student_id, job.message)   # in-app, real-time
+            send_email(job.student_id, job.message)    # external, may fail
+            mark_status(job.student_id, job.message, 'sent')
+        catch error:
+            if job.attempts < MAX_RETRIES:
+                requeue_with_backoff(job)              # retry only this job
+            else:
+                mark_status(job.student_id, job.message, 'failed')
+                move_to_dead_letter(job)               # for later inspection
+```
+
+This keeps the user-facing request fast (it just writes and enqueues), makes delivery reliable (retries, dead-letter, per-student status), and isolates failures so 200 email errors no longer block or lose the other 49,800 notifications.
