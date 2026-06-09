@@ -535,3 +535,45 @@ function delivery_worker():
 ```
 
 This keeps the user-facing request fast (it just writes and enqueues), makes delivery reliable (retries, dead-letter, per-student status), and isolates failures so 200 email errors no longer block or lose the other 49,800 notifications.
+
+## Stage 6
+
+### Goal
+
+Introduce a Priority Inbox that surfaces the top `n` most important unread notifications first (the example uses top 10). Priority is determined by a combination of **type weight** (placement > result > event) and **recency**.
+
+The implementation lives in the `notification_app_be/` directory, is written in TypeScript, fetches live data from the notification API, and uses the logging middleware throughout. It does not hard-code or invent notifications, and it does not use a database.
+
+### Priority Rule
+
+Each notification is ranked by two keys:
+
+1. **Type weight (primary):** `placement = 3`, `result = 2`, `event = 1`. A higher weight always ranks higher.
+2. **Recency (tie-breaker):** within the same type, the more recent `Timestamp` ranks higher.
+
+This keeps the requested ordering strict and deterministic (a placement always outranks a result, which always outranks an event), while recency decides order inside a tier. The logic is in `notification_app_be/priority.ts`.
+
+### Selecting the Top N Efficiently
+
+A naive approach sorts the entire list (`O(m log m)` for `m` notifications) every time. Since we only need the top `n` and new notifications keep arriving, the implementation uses a **bounded min-heap of size `n`** (`notification_app_be/topNHeap.ts`):
+
+- The heap root is always the lowest-priority item currently in the top `n`.
+- Each incoming notification is compared against the root. If it is higher priority, it replaces the root; otherwise it is discarded.
+- Cost is **`O(log n)` per notification** and memory stays bounded at `n`, regardless of how many notifications stream in.
+
+This is exactly what makes maintaining the top `n` efficient as new notifications keep coming: there is no full re-sort, only a cheap heap operation per arrival. To return the final list in display order, the heap contents (at most `n` items) are sorted once.
+
+### Files
+
+- `notification_app_be/types.ts` — notification and response types.
+- `notification_app_be/priority.ts` — type weights, timestamp parsing, and the priority comparator.
+- `notification_app_be/topNHeap.ts` — the bounded min-heap that maintains the top `n`.
+- `notification_app_be/index.ts` — fetches from the API, runs the heap, logs each step via the middleware, and prints the priority inbox.
+
+### Running
+
+```
+npx ts-node notification_app_be/index.ts
+```
+
+A valid bearer token must be present in the repository root `.env` as `ACCESS_TOKEN`. The screenshots of the output are in `notification_app_be/screenshots/`.

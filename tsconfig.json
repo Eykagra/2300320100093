@@ -9,6 +9,6 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["logging_middleware/**/*.ts"],
+  "include": ["logging_middleware/**/*.ts", "notification_app_be/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
