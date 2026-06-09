@@ -418,3 +418,43 @@ This is supported efficiently by an index on the type and time:
 CREATE INDEX idx_notifications_type_created
     ON notifications (notification_type, created_at);
 ```
+
+## Stage 4
+
+### The Problem
+
+Notifications are fetched from the database on every page load, for every student. With a large active user base this means the same unread lists and counts are read from the database over and over, even though the data rarely changes between loads. The database becomes the bottleneck, latency rises, and the user experience degrades.
+
+The goal is to cut the number of database reads on the hot path and serve repeated requests from somewhere cheaper. Below are the strategies, each with its tradeoffs.
+
+### Strategy 1: Cache the notification data (Redis)
+
+Cache each student's unread list and unread count in an in-memory store such as Redis, keyed by `student_id`. Reads hit Redis first and only fall through to the database on a miss. The cache entry is invalidated or updated when a notification is created or marked read.
+
+- **Benefit:** removes the vast majority of repeated reads from the database; sub-millisecond lookups; the database load becomes roughly proportional to writes, not page loads.
+- **Tradeoff:** introduces a cache-consistency problem. A stale entry can show a wrong count until invalidated. It adds operational complexity (another service to run and monitor) and memory cost. Needs a sensible TTL and explicit invalidation on writes.
+
+### Strategy 2: Maintain a denormalised unread counter
+
+Keep a per-student `unread_count` column (or a Redis counter) that is incremented on insert and decremented on mark-read, so the badge count never runs `count(*)` over the notifications table.
+
+- **Benefit:** the most frequent request, the unread badge, becomes an O(1) lookup instead of an aggregate scan.
+- **Tradeoff:** the counter must be kept exactly in sync with the underlying rows. Concurrent updates need atomic increments/decrements, and a drift between counter and reality requires a periodic reconciliation job.
+
+### Strategy 3: Stop polling, push instead (SSE)
+
+Rather than re-fetching on every page load, the client loads notifications once and then keeps a Server-Sent Events connection open (the mechanism chosen in Stage 1). New notifications are pushed as they happen, so no repeated full fetches are needed.
+
+- **Benefit:** eliminates redundant reads entirely for an open session; data arrives in real time; the database is touched only when something actually changes.
+- **Tradeoff:** long-lived connections consume server resources and need careful handling behind load balancers and proxies. On reconnect the client must reconcile any missed items with a single catch-up query.
+
+### Strategy 4: Client-side caching with HTTP headers
+
+Use `ETag`/`Last-Modified` and short-lived client caching so the browser can issue conditional requests. When nothing has changed the server replies `304 Not Modified` with no body.
+
+- **Benefit:** cheap to add, reduces payload size and some server work without new infrastructure.
+- **Tradeoff:** the request still reaches the server, so it reduces bandwidth more than database load. Best used together with Strategies 1–3, not on its own.
+
+### Recommended Combination
+
+Use SSE to remove repeated fetches during an active session (Strategy 3), back the initial load and reconnect catch-up with a Redis cache (Strategy 1), and keep a denormalised unread counter for the badge (Strategy 2). HTTP caching (Strategy 4) is a low-cost addition on top. Together they shift the workload from "read on every page load" to "read only when data changes", which is what protects the database at scale.
