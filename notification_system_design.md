@@ -577,3 +577,51 @@ npx ts-node notification_app_be/index.ts
 ```
 
 A valid bearer token must be present in the repository root `.env` as `ACCESS_TOKEN`. The screenshots of the output are in `notification_app_be/screenshots/`.
+
+## Stage 7
+
+### Overview
+
+The frontend is a responsive **React + TypeScript** single-page application styled with **Material UI**, located in `notification_app_fe/`. It runs exclusively on `http://localhost:3000`. It consumes the notification API directly and uses the logging middleware for all API calls and significant page events.
+
+### Pages
+
+1. **All Notifications** (`/`) — lists every notification and supports filtering by type (`Placement`, `Result`, `Event`). New notifications are visually highlighted until the user has viewed them.
+2. **Priority Inbox** (`/priority`) — displays the top `n` notifications first, ranked by priority. The user can choose `n` (top 10, 15, or 20) and filter by type. Priority follows the same rule as Stage 6: type weight (placement > result > event) with recency as the tie-breaker.
+
+### New vs Already-Viewed
+
+Viewed notification IDs are persisted in `localStorage`. When a notification has not been seen before, the card is rendered with a highlighted left border, a tinted background, and a "New" badge. Once the All Notifications page loads and displays an item, its ID is recorded as viewed so it appears as read on subsequent visits. This distinction is handled entirely on the frontend, as required.
+
+### API Usage
+
+The API client (`src/api.ts`) calls the notifications endpoint using the supported query parameters:
+
+- `limit` — number of items to request.
+- `page` — page number for pagination.
+- `notification_type` — filter by `Placement`, `Result`, or `Event`.
+
+### Styling and Responsiveness
+
+The UI uses Material UI components throughout (`AppBar`, `Card`, `Chip`, `ToggleButton`, `Container`, responsive `Stack` direction). The layout adapts between mobile and desktop: the container width, spacing, and the priority controls reflow from a column on small screens to a row on larger ones.
+
+### Structure
+
+- `src/main.tsx` — entry point, router and theme providers.
+- `src/App.tsx` — routes for the two pages.
+- `src/api.ts` — notification API client with query-parameter support.
+- `src/logger.ts` — frontend logging via the middleware contract.
+- `src/priority.ts` — priority ranking and top-`n` selection.
+- `src/viewed.ts` — localStorage tracking of viewed notifications.
+- `src/components/` — `Layout`, `NotificationCard`, `NotificationList`, `TypeFilter`.
+- `src/pages/` — `AllNotifications`, `PriorityInbox`.
+
+### Running
+
+```
+cd notification_app_fe
+npm install
+npm run dev
+```
+
+A valid bearer token must be present in `notification_app_fe/.env` as `VITE_ACCESS_TOKEN`. Screenshots and the video recording of both desktop and mobile views are in `notification_app_fe/screenshots/`.
