@@ -1,0 +1,15 @@
+{
+  "name": "2300320100093",
+  "version": "1.0.0",
+  "scripts": {
+    "test:logger": "ts-node logging_middleware/test.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}
