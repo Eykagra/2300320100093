@@ -236,3 +236,116 @@ Why SSE over the alternatives:
 - **SSE vs polling**: polling wastes requests and adds latency. SSE pushes the moment data is ready, with one open connection per client.
 
 Client actions (mark read, list) continue to use the REST endpoints above. The stream is read-only and used purely for live delivery. When the connection drops, the browser's `EventSource` reconnects and the client can reconcile missed items with a `GET /notifications?unread=true` call.
+
+## Stage 2
+
+### Storage Choice
+
+For this platform a **relational database (PostgreSQL)** is the right primary store.
+
+The data is highly structured and relational: students own notifications, notifications have a fixed set of typed fields, and the read/unread state is a simple boolean flag. The access patterns are well known in advance (list a student's notifications, filter by type, count unread). These are exactly the workloads relational engines and B-tree indexes are built for.
+
+PostgreSQL also gives strong consistency and transactional guarantees, which matter when a single "Notify All" action writes for many students and clients are simultaneously marking items read. A document store would not buy us anything here because there is no schema variability, and the relational model keeps the notification-to-student relationship clean and enforceable with foreign keys.
+
+### Schema
+
+```sql
+-- Students who receive notifications.
+CREATE TABLE students (
+    id          BIGSERIAL PRIMARY KEY,
+    roll_no     VARCHAR(20) UNIQUE NOT NULL,
+    name        VARCHAR(120) NOT NULL,
+    email       VARCHAR(160) UNIQUE NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Enum constraining the kind of notification.
+CREATE TYPE notification_type AS ENUM ('placement', 'result', 'event');
+
+-- Notifications belonging to a student.
+CREATE TABLE notifications (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_id        BIGINT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    notification_type notification_type NOT NULL,
+    message           TEXT NOT NULL,
+    is_read           BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### Indexes
+
+The dominant query fetches a single student's unread notifications ordered by time. A composite partial index serves it directly:
+
+```sql
+-- Optimises: unread notifications for a student, newest/oldest first.
+CREATE INDEX idx_notifications_student_unread
+    ON notifications (student_id, created_at)
+    WHERE is_read = FALSE;
+
+-- Supports filtering a student's notifications by type.
+CREATE INDEX idx_notifications_student_type
+    ON notifications (student_id, notification_type, created_at);
+```
+
+### Problems as Data Volume Grows
+
+As the platform reaches tens of thousands of students and millions of notifications, a few issues surface:
+
+1. **Table bloat and slow scans.** A single `notifications` table with millions of rows makes unindexed queries do full scans. Solved by the composite indexes above and by always querying with `student_id` as the leading predicate.
+2. **Unbounded growth.** Old notifications accumulate forever. Solved with a retention policy and **time-based partitioning** (e.g. monthly partitions on `created_at`) so old partitions can be dropped or archived cheaply.
+3. **Write contention on "Notify All".** Inserting 50,000 rows at once can lock and slow reads. Solved with batched inserts and, longer term, by moving fan-out writes through a queue (covered in Stage 5).
+4. **Index write cost.** Every index slows inserts. Solved by keeping indexes minimal and purpose-built rather than indexing every column.
+5. **Hot unread counts.** Counting unread on every page load is expensive at scale. Solved by caching the count and/or maintaining a per-student counter (covered in Stage 4).
+
+### Queries
+
+These map directly to the Stage 1 endpoints.
+
+```sql
+-- List notifications: GET /api/v1/notifications (paginated, newest first)
+SELECT id, notification_type, message, is_read, created_at
+FROM notifications
+WHERE student_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3;
+
+-- List unread only: GET /api/v1/notifications?unread=true
+SELECT id, notification_type, message, is_read, created_at
+FROM notifications
+WHERE student_id = $1 AND is_read = FALSE
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3;
+
+-- Filter by type: GET /api/v1/notifications?type=placement
+SELECT id, notification_type, message, is_read, created_at
+FROM notifications
+WHERE student_id = $1 AND notification_type = 'placement'
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3;
+
+-- Get one: GET /api/v1/notifications/{id}
+SELECT id, notification_type, message, is_read, created_at
+FROM notifications
+WHERE id = $1 AND student_id = $2;
+
+-- Mark one read: PATCH /api/v1/notifications/{id}
+UPDATE notifications
+SET is_read = TRUE
+WHERE id = $1 AND student_id = $2;
+
+-- Mark all read: POST /api/v1/notifications/read-all
+UPDATE notifications
+SET is_read = TRUE
+WHERE student_id = $1 AND is_read = FALSE;
+
+-- Unread count: GET /api/v1/notifications/unread-count
+SELECT count(*) AS unread
+FROM notifications
+WHERE student_id = $1 AND is_read = FALSE;
+
+-- Create one: POST /api/v1/notifications
+INSERT INTO notifications (student_id, notification_type, message)
+VALUES ($1, $2, $3)
+RETURNING id, notification_type, message, is_read, created_at;
+```
